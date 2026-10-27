@@ -1,0 +1,6 @@
+{
+  "name": "claude-tetris",
+  "description": "Tetris en un panel de Claude Code",
+  "owner": { "name": "Edgar-MP" },
+  "plugins": [{ "name": "tetris", "source": "./" }]
+}
