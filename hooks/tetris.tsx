@@ -9,15 +9,24 @@ type Game = {
   lines: number
   over: boolean
   paused: boolean
-  // gravity ticks since the last drop; mutated in place, never redrawn on its own
+  // The board has proven it holds the keyboard (a click or a key reached it).
+  // Starts false, so a fresh pane is held until the person focuses it.
+  active: boolean
+  // The last `blurs` count seen in the props: a higher one means the person
+  // typed in the prompt, so the keyboard left the board.
+  seenBlurs: number
+  // Ticks without input, and ticks since the last drop: both mutated in place,
+  // never redrawn on their own.
+  idle: number
   t: number
-  // whether the pane holds the keyboard; written on each draw, read by the timer
-  focused: boolean
 }
 
 const W = 10
 const H = 20
 const TICK_MS = 100
+// The surface never says when the keyboard leaves the board (another window,
+// a click in the chat): no key for this long counts as having lost it.
+const IDLE_TICKS = 80
 
 // Cells (x, y) of each piece in its own box; SIZES holds the box side.
 const SHAPES: [number, number][][] = [
@@ -70,8 +79,10 @@ const newGame = (): Game =>
       lines: 0,
       over: false,
       paused: false,
+      active: false,
+      seenBlurs: 0,
+      idle: 0,
       t: 0,
-      focused: true,
     },
     Array.from({ length: H }, () => Array<number>(W).fill(0)),
   )
@@ -117,26 +128,42 @@ const hardDrop = (g: Game): Game => {
   return lock(cur)
 }
 
-const Tetris: ClientModule<{ isFocused: boolean }, Game> = (props, surface) => {
+const Tetris: ClientModule<{ isFocused: boolean; blurs: number }, Game> = (props, surface) => {
   const { Box, Text } = surface.elements
 
   if (surface.state === undefined) {
-    surface.setState(newGame())
+    surface.setState({ ...newGame(), seenBlurs: props?.blurs ?? 0 })
 
     surface.every(TICK_MS, () => {
       const g = surface.state
-      if (!g || g.over || g.paused || !g.focused) return
+      if (!g || !g.active) return
+
+      g.idle += 1
+      if (g.idle >= IDLE_TICKS) return surface.setState({ ...g, active: false })
+      if (g.over || g.paused) return
+
       g.t += 1
       const period = Math.max(2, 10 - level(g))
       if (g.t >= period) surface.setState(drop(g))
     })
 
-    surface.onKey(({ key }) => {
+    // A click on the board is what gives it the keyboard; the pointer leaving
+    // it (towards the chat, say) is the nearest sign that the keyboard left.
+    surface.onPointer(e => {
       const g = surface.state
       if (!g) return
-      if (key === 'r') return surface.setState(newGame())
+      if (e.type === 'down') surface.setState({ ...g, active: true, idle: 0 })
+      else if (e.type === 'leave' && g.active) surface.setState({ ...g, active: false })
+    })
+
+    // A key reaching the board proves it holds the keyboard.
+    surface.onKey(({ key }) => {
+      const g0 = surface.state
+      if (!g0) return
+      const g = { ...g0, active: true, idle: 0 }
+      if (key === 'r') return surface.setState({ ...newGame(), active: true, seenBlurs: g.seenBlurs })
       if (key === 'p') return surface.setState({ ...g, paused: !g.paused })
-      if (g.over || g.paused) return
+      if (g.over || g.paused) return surface.setState(g)
 
       let next: Game | null = null
       if (key === 'left' || key === 'a') next = move(g, -1, 0)
@@ -145,14 +172,19 @@ const Tetris: ClientModule<{ isFocused: boolean }, Game> = (props, surface) => {
       else if (key === 'up' || key === 'w' || key === 'x') next = move(g, 0, 0, 1)
       else if (key === 'z') next = move(g, 0, 0, -1)
       else if (key === ' ') next = hardDrop(g)
-      if (next) surface.setState(next)
+      surface.setState(next ?? g)
     })
 
     return <Text dimColor>Cargando…</Text>
   }
 
   const g = surface.state
-  g.focused = props?.isFocused ?? true
+  // The pane holding the keyboard (a click in the aside outside the board)
+  // means the board does not; typing in the prompt means it left too.
+  if (props && (props.isFocused || props.blurs !== g.seenBlurs)) {
+    g.seenBlurs = props.blurs
+    g.active = false
+  }
   const shown = g.board.map(row => row.slice())
   if (!g.over) {
     for (const [x, y] of cellsOf(g.piece)) shown[y][x] = g.piece.kind + 1
@@ -162,7 +194,11 @@ const Tetris: ClientModule<{ isFocused: boolean }, Game> = (props, surface) => {
 
   return (
     <Box flexDirection="row" gap={1}>
-      <Box flexDirection="column" borderStyle="round" borderColor={g.over ? 'red' : undefined}>
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={g.over ? 'red' : g.active ? undefined : 'yellow'}
+      >
         {shown.map(row => (
           <Box flexDirection="row">
             {row.map(c =>
@@ -195,9 +231,9 @@ const Tetris: ClientModule<{ isFocused: boolean }, Game> = (props, surface) => {
         ))}
         <Text> </Text>
         {g.over && <Text color="red" bold>GAME OVER</Text>}
-        {g.paused && <Text color="yellow" bold>PAUSA</Text>}
-        {!g.focused && !g.over && <Text color="yellow" bold>SIN FOCO</Text>}
-        {!g.focused && !g.over && <Text dimColor>haz clic o Tab</Text>}
+        {g.paused && g.active && <Text color="yellow" bold>PAUSA</Text>}
+        {!g.active && !g.over && <Text color="yellow" bold>SIN FOCO</Text>}
+        {!g.active && !g.over && <Text dimColor>haz clic en el tablero</Text>}
         <Text> </Text>
         <Text dimColor>←→ mover</Text>
         <Text dimColor>↑ girar</Text>
@@ -206,6 +242,7 @@ const Tetris: ClientModule<{ isFocused: boolean }, Game> = (props, surface) => {
         <Text dimColor>p pausa</Text>
         <Text dimColor>r reiniciar</Text>
         <Text dimColor>esc salir</Text>
+
       </Box>
     </Box>
   )
